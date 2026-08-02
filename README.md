@@ -2,7 +2,7 @@
 
 **Month 2 · Sep 2026** — Accurate, cited answers over large document collections — with the evaluation to prove it.
 
-> Depends on [`ai-core`](https://github.com/<your-github-username>/ai-core) — the shared provider gateway, cost accounting, and evaluation primitives used across this portfolio.
+> Depends on [`ai-core`](https://github.com/ashutoshbehera/ai-core) — the shared provider gateway, cost accounting, and evaluation primitives used across this portfolio.
 
 > **Status:** 🚧 Scaffolded. Implementation begins Sep 2026.
 > Sections 7 (Evaluation Results) and 8 (Demo) are filled in as the work lands — they are
@@ -98,7 +98,7 @@ What this project deliberately does **not** do, and why:
 ## Quickstart
 
 ```bash
-git clone https://github.com/<your-github-username>/enterprise-rag-platform.git
+git clone https://github.com/ashutoshbehera/enterprise-rag-platform.git
 cd enterprise-rag-platform
 
 python -m venv .venv && source .venv/bin/activate
@@ -129,7 +129,7 @@ docs/              architecture · design-decisions · evaluation · cost-analys
 
 ---
 
-Part of a [6-month Product AI Engineer portfolio](https://github.com/<your-github-username>) —
+Part of a [6-month Product AI Engineer portfolio](https://github.com/ashutoshbehera) —
 `ai-core` · `llm-engineering-playground` · `enterprise-rag-platform` ·
 `multi-agent-ai-platform` · `llm-evaluation-platform` · `production-ai-assistant` ·
 `ai-model-router`
