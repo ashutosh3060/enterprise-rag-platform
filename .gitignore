@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Environment & secrets
+.env
+.env.local
+*.pem
+.provider-status.json
+
+# Data & artifacts
+data/
+*.db
+*.sqlite3
+mlruns/
+.chroma/
+qdrant_storage/
+outputs/
+
+# Node (M5)
+node_modules/
+.next/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
