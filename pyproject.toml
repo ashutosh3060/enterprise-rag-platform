@@ -9,7 +9,7 @@ dependencies = [
     "python-dotenv>=1.0",
     "httpx>=0.27",
     "rich>=13.7",
-    "ai-core @ git+https://github.com/ashutosh3060/ai-core.git@v0.1.0",
+    "ai-core @ git+https://github.com/ashutosh3060/ai-core.git@v0.2.0",
 ]
 
 [project.optional-dependencies]
@@ -19,6 +19,11 @@ dev = [
     "ruff>=0.5",
     "mypy>=1.10",
 ]
+
+# Required for the `ai-core @ git+...` dependency: hatchling rejects direct
+# URL references unless explicitly allowed.
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [build-system]
 requires = ["hatchling"]
