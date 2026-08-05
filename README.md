@@ -1,97 +1,206 @@
 # enterprise-rag-platform
 
-**Month 2 · Sep 2026** — Accurate, cited answers over large document collections — with the evaluation to prove it.
+**Month 2 · Sep 2026** — Accurate, cited answers over large document collections, with the evaluation to prove it.
 
-> Depends on [`ai-core`](https://github.com/ashutosh3060/ai-core) — the shared provider gateway, cost accounting, and evaluation primitives used across this portfolio.
+> Depends on [`ai-core`](https://github.com/ashutosh3060/ai-core) — the shared provider
+> gateway, versioned cost accounting, and shared types used across this portfolio.
 
-> **Status:** 🚧 Scaffolded. Implementation begins Sep 2026.
-> Sections 7 (Evaluation Results) and 8 (Demo) are filled in as the work lands — they are
-> the point of the repository, not an afterthought.
+**The retrieval half runs with no API key.** Embeddings are local
+(`sentence-transformers`), so ingestion, hybrid search, reranking, permission
+filtering, and the full evaluation ablation work offline. Only answer *generation*
+needs a provider.
 
 ---
 
 ## 1. Problem
 
-Employees and customers cannot find answers buried in thousands of PDFs, wikis, and contracts. Naive RAG demos work on a curated ten-document corpus and fall apart on real enterprise data: acronyms, near-duplicate versions, access control, and questions whose answer spans three documents.
+Employees and customers cannot find answers buried in thousands of PDFs, wikis, and
+contracts. Naive RAG demos work on a curated ten-document corpus and fall apart on
+real enterprise data: part numbers, error codes, near-duplicate policy revisions,
+acronyms that mean different things in different departments, and access control
+that must actually hold.
 
 ## 2. Business Value
 
-Support deflection and internal search are the two highest-ROI enterprise LLM use cases — and the two where a wrong answer is most expensive. The value is not 'a chatbot over documents'; it is a system whose faithfulness you can measure, whose answers cite their sources, and which cannot leak a document the asker is not entitled to see.
+Support deflection and internal search are the two highest-ROI enterprise LLM use
+cases, and the two where a wrong answer is most expensive. The value is not "a
+chatbot over documents" — it is a system whose retrieval quality you can measure,
+whose answers cite their sources, which never returns a withdrawn policy, and which
+cannot leak a document the asker is not entitled to see.
 
 ## 3. Architecture
 
 ```
 Documents (PDF · DOCX · Markdown · Web)
            |
- Ingestion pipeline  ── parse · normalize · version · attach metadata + ACLs
+  Ingestion — parse · normalise · version · attach metadata + ACLs
            |
-      Chunking       ── fixed | recursive | semantic  (pluggable)
+     Chunking — fixed | recursive | semantic        (pluggable, ablated)
            |
-  Embedding model
+   Local embeddings (sentence-transformers, CPU)
            |
-   Vector database  ────────┐
-           |                |
-       Retriever   ←── BM25 (hybrid, RRF fusion)
+     Vector store  ─────────────┐
+           |                    |
+       Retriever  ←──────── BM25 lexical
            |
- Metadata + permission filter   (applied at retrieval, not after)
+     RRF fusion (rank-based, no score calibration)
            |
-      Reranker (cross-encoder)
+  Permission + version filter   ← inside the query, never after generation
            |
-         LLM
+   Cross-encoder reranker       ← retrieve wide for recall, rerank narrow for precision
            |
- Answer + inline citations  →  feedback loop → labelled eval set
+      [ LLM generation + citations ]   ← the only stage needing an API key
 ```
 
 ## 4. Technology Choices
 
 | Technology | Why this one |
 |---|---|
-| **LlamaIndex** | Best-in-class document ingestion and node/metadata model. Used for the pipeline; retrieval orchestration stays explicit rather than hidden in an abstraction. |
-| **Qdrant** | Native hybrid search, payload filtering, and named vectors. Payload filters are what make pre-retrieval permission enforcement possible. |
-| **Cross-encoder reranker** | Bi-encoder retrieval optimizes for recall; a cross-encoder restores precision on the top-k. This is consistently the single largest quality win in the pipeline. |
-| **Ragas** | Standard RAG metrics — context precision/recall, faithfulness, answer relevancy — so results are comparable to published baselines instead of bespoke. |
+| **sentence-transformers** (local) | Embedding runs on every chunk at ingest and every query at serve. An API round-trip per query is latency and cost nobody wants — and it makes the whole retrieval half runnable with no key. |
+| **NumPy store (default) + Chroma** | The default store is exact brute-force. An ablation comparing retrieval strategies must not have ANN recall error mixed into the measurement. Chroma is there for scale; Qdrant is the production answer but needs a running service. |
+| **rank-bm25** | The lexical leg. Exact matching is the only thing that separates `RMA-4471` from `RMA-4472`. |
+| **RRF fusion** | Combines *ranks*, so no calibration is needed between a cosine similarity and a BM25 score — two quantities on incomparable scales. Weighted blending needs a per-corpus coefficient; RRF has one constant. |
+| **Cross-encoder reranker** | Bi-encoder retrieval is fast because query and document never interact, which is also why it loses precision. A cross-encoder reads the pair together. |
+
+> ⚠️ **Platform pins are load-bearing on x86 macOS.** PyTorch stopped publishing Intel
+> Mac wheels after 2.2.2, and current `transformers` calls torch APIs that do not exist
+> there. Unpinned installs fail with a misleading `NameError: name 'torch' is not
+> defined`. See `pyproject.toml`.
 
 ## 5. Design Decisions
 
-### 1. Permissions filter at retrieval time, never after generation
+### Permissions filter inside the retrieval query, never after generation
+Post-filtering means restricted content has already entered the model's context and
+can leak through paraphrase. Both the vector store and BM25 apply the visibility
+mask *before* ranking, so a filtered chunk cannot occupy a top-k slot.
 
-Post-filtering means restricted content has already entered the model's context and can leak through paraphrase. Filtering in the vector query is the only version that is actually a security boundary.
+### Documents are versioned, not overwritten
+Enterprise policies supersede each other. Answering from a superseded revision is a
+correctness bug, not a staleness annoyance — so `superseded` is a retrieval filter
+and the ablation reports a `superseded` column that must stay at zero.
 
-### 2. Hybrid retrieval (dense + BM25, fused with RRF) is the default
+### Relevance is labelled per document, not per chunk
+Several chunks of the same document would each count as a separate hit and inflate
+precision. Only the first occurrence of a document counts.
 
-Enterprise corpora are dense with identifiers, acronyms, error codes, and part numbers — exactly the tokens dense embeddings handle worst and lexical search handles best. Pure-dense retrieval underperforms badly on real queries.
+### Queries whose correct answer is *nothing* are scored by leakage, not recall
+Three queries ask for restricted content with the wrong role. Averaging a fabricated
+1.0 into recall would mask real misses; they are excluded from recall and counted in
+the `leaked` column instead, where any value above zero is a defect.
 
-### 3. Answers must cite chunk IDs; uncited claims are flagged
+### The corpus contains 184 generated distractors
+The twelve hand-written documents are the labelled gold set. On their own they are
+not a benchmark — at k=5 you retrieve 42% of the corpus and **recall@5 is 1.000 for
+every strategy**. That was the first result this project produced, and it measured
+the corpus rather than the retrievers. The distractors are near misses: identifiers
+differing by a digit, policies on adjacent topics.
 
-An answer without provenance cannot be audited or trusted. Citations also give the faithfulness scorer something concrete to verify against.
+## 6. Prior Art
 
-### 4. Documents are versioned, not overwritten
+LlamaIndex, LangChain, Haystack, and Vectara all do enterprise RAG, and every managed
+offering (Azure AI Search, Vertex AI Search, Amazon Kendra) does it with more
+polish. **If you need this in production, use one of them.**
 
-Enterprise policies supersede each other. Answering from a superseded revision is a correctness bug, not a staleness annoyance — so version is a first-class retrieval filter.
+What this repo has that a framework tutorial does not is the *measurement*: a
+labelled query set built to expose where each retrieval strategy fails, and an
+ablation that reports a result contradicting the usual advice (below). Frameworks
+give you the components; they do not tell you which combination works on your corpus.
 
-## 6. Trade-offs
+## 7. Trade-offs
 
-What this project deliberately does **not** do, and why:
+- **Synthetic corpus.** Authored fiction, so the absolute numbers do not transfer.
+  The *relative* ordering of strategies is the finding.
+- **No knowledge graph.** Multi-hop questions are out of scope; query decomposition
+  would be the cheaper next step.
+- **Exact search by default.** Correct up to ~10⁵ chunks. Beyond that, ANN — and the
+  recall/latency trade-off becomes another thing to measure.
+- **Reranking triples query latency** (31ms → 107ms here). Worth it on these results;
+  measure before assuming it is worth it on yours.
 
-- Semantic chunking costs an extra embedding pass at ingest. Accepted: ingest is a batch cost paid once, retrieval quality is paid on every query.
-- Reranking adds latency to every query. Mitigated by reranking only the top-k (k≈25 → 5) rather than the full candidate set.
-- No knowledge graph. Multi-hop questions are handled with query decomposition instead — far less infrastructure for most of the benefit on this corpus type.
+## 8. Evaluation Results
 
-## 7. Evaluation Results
+**196 documents · 20 labelled queries · k=5 · no API key required.** Reproduce with
+`rag ablate -k 5`.
 
-> _To be populated during Sep 2026._
-> Real, measured numbers only — no estimates. See [`docs/evaluation.md`](docs/evaluation.md)
-> for methodology and [`docs/cost-analysis.md`](docs/cost-analysis.md) for the cost breakdown.
+| Configuration | recall@5 | precision@5 | MRR | nDCG@5 | leaked | superseded | ms |
+|---|---|---|---|---|---|---|---|
+| `semantic + hybrid+rerank` | **1.000** | 0.246 | **1.000** | **1.000** | 0 | 0 | 156 |
+| `fixed + hybrid+rerank` | 1.000 | 0.211 | 1.000 | 0.996 | 0 | 0 | 195 |
+| `recursive + hybrid+rerank` | 1.000 | 0.211 | 1.000 | 0.996 | 0 | 0 | 107 |
+| `fixed + bm25` | 0.944 | 0.339 | 0.944 | 0.938 | 0 | 0 | 0 |
+| `recursive + bm25` | 0.944 | 0.339 | 0.944 | 0.938 | 0 | 0 | 0 |
+| `semantic + bm25` | 0.944 | **0.365** | 0.944 | 0.938 | 0 | 0 | 1 |
+| `fixed + hybrid` | 0.944 | 0.200 | 0.807 | 0.837 | 0 | 0 | 34 |
+| `recursive + hybrid` | 0.944 | 0.200 | 0.807 | 0.837 | 0 | 0 | 31 |
+| `semantic + hybrid` | 0.889 | 0.213 | 0.824 | 0.836 | 0 | 0 | 28 |
+| `semantic + dense` | 0.833 | 0.206 | 0.833 | 0.829 | 0 | 0 | 28 |
+| `fixed + dense` | 0.778 | 0.167 | 0.750 | 0.753 | 0 | 0 | 90 |
+| `recursive + dense` | 0.778 | 0.167 | 0.750 | 0.753 | 0 | 0 | 31 |
 
-## 8. Demo
+### recall@5 by query kind — where the aggregate hides the story
 
-> _2–4 minute walkthrough — to be recorded at the end of Sep 2026._
+| Configuration | acronym | identifier | mixed | paraphrase | versioned |
+|---|---|---|---|---|---|
+| `* + hybrid+rerank` | 1.000 | **1.000** | **1.000** | **1.000** | 1.000 |
+| `* + bm25` | 1.000 | **1.000** | 0.833 | 1.000 | 1.000 |
+| `fixed/recursive + hybrid` | 1.000 | 1.000 | 1.000 | 0.750 | 1.000 |
+| `semantic + dense` | 1.000 | **0.500** | 1.000 | 0.750 | 1.000 |
+| `fixed/recursive + dense` | 1.000 | **0.500** | 1.000 | 0.750 | **0.500** |
 
-## 9. Future Improvements
+## Findings
 
-- Query decomposition and multi-hop retrieval for questions spanning several documents.
-- Incremental re-indexing on document update instead of full re-ingest.
-- Automatic hard-negative mining from thumbs-down feedback to fine-tune the reranker.
+**1. Dense retrieval misses half the identifier queries — recall 0.500 vs 1.000 for
+anything with a lexical leg.** This is the thesis, and it held. An embedding places
+`RMA-4471` and `RMA-4472` in nearly the same region; only exact matching separates
+them. On a corpus dense with part numbers and error codes, pure vector search
+silently fails on exactly the queries a support engineer actually types.
+
+**2. Hybrid without reranking was *worse* than BM25 alone — nDCG 0.837 vs 0.938.**
+This contradicts the usual "hybrid beats both" advice, and it is the most useful
+result here. RRF promoted dense's plausible-but-wrong neighbours into slots BM25 had
+correctly filled, dragging MRR from 0.944 to 0.807. Fusion is not free: adding a
+weaker retriever to a stronger one can dilute it. **Reranking is what recovers it**
+— the cross-encoder re-sorts the fused candidates and lifts nDCG to 0.996–1.000.
+
+The practical reading: *hybrid retrieval and reranking are one decision, not two.*
+Shipping hybrid without a reranker, on a corpus like this, would have been a
+regression against the simpler BM25 baseline.
+
+**3. Dense retrieval returned superseded policy revisions on half the versioned
+queries** (recall 0.500 with fixed/recursive chunking). It cannot distinguish v1 from
+v2 of the same policy — the texts are near-identical in embedding space. Only the
+explicit `superseded` filter prevents answering from a withdrawn policy.
+
+**4. Access control held everywhere — zero leaked chunks across all 12
+configurations.** Because filtering is inside the retrieval query rather than after
+it, the invariant does not depend on which strategy is used.
+
+**5. Reranking costs 3.5× query latency** (31ms → 107ms) for +0.16 nDCG. Cheap here;
+worth re-measuring on a corpus where retrieval is not already near-perfect.
+
+### Limitations
+
+- Synthetic corpus of 196 documents. Absolute numbers do not transfer; the ordering
+  is the finding.
+- 20 labelled queries is small. Per-kind cells rest on 2–6 queries each, so treat
+  individual cells as directional.
+- BM25 scored 1.000 on paraphrase queries, higher than expected. The synthetic
+  paraphrases likely retain more vocabulary overlap than genuine user phrasing would.
+  A real corpus would probably widen dense's advantage there.
+- No statistical significance testing at this sample size.
+
+## 9. Demo
+
+> _To be recorded._
+
+## 10. Future Improvements
+
+- **Generation with citations** — the last stage, needs an API key. Answers must cite
+  chunk IDs; uncited claims get flagged.
+- **Faithfulness and hallucination scoring** (Ragas) — also needs a key.
+- **Query decomposition** for multi-hop questions.
+- **Learned fusion weights** instead of vanilla RRF, given finding 2.
+- **Incremental re-indexing** on document update rather than full re-ingest.
 
 ---
 
@@ -100,36 +209,34 @@ What this project deliberately does **not** do, and why:
 ```bash
 git clone https://github.com/ashutosh3060/enterprise-rag-platform.git
 cd enterprise-rag-platform
-
 python -m venv .venv && source .venv/bin/activate
-make install
+pip install -e ".[dev]"
 
-cp .env.example .env      # add ANTHROPIC_API_KEY (the only required key)
-python -m ai_core.probe   # confirm which providers are reachable
+rag corpus                      # inspect the corpus and labelled queries
+rag query "RMA-4471"            # hybrid retrieval
+rag query "what do I do if production credentials leak" --roles engineering
+rag ablate -k 5 -o docs/ablation.md
 ```
 
-Everything except Anthropic is optional — the gateway registers a provider only when its key
-is present, and each view renders whatever is available.
+The second query returns **nothing** — that document is security-restricted, and
+withholding it is the correct behaviour.
 
 ## Repository Layout
 
 ```
-src/rag_platform/    application code
-tests/             unit + integration tests
-docs/              architecture · design-decisions · evaluation · cost-analysis · future-roadmap
+src/rag_platform/
+  models.py       Document, Chunk, ScoredChunk — versioning and ACLs
+  chunking.py     fixed | recursive | semantic
+  embedding.py    local sentence-transformers
+  store.py        NumpyStore (exact) + ChromaStore
+  retrieval.py    dense, BM25, RRF hybrid, cross-encoder rerank
+  corpus.py       synthetic gold set + 184 distractors + 20 labelled queries
+  evaluation.py   recall/precision/MRR/nDCG + leakage, LLM-free
+  pipeline.py     indexing and the ablation runner
+tests/            20 tests, all offline
+docs/             ablation.md
 ```
-
-## Documentation
-
-- [Architecture](docs/architecture.md)
-- [Design Decisions](docs/design-decisions.md)
-- [Evaluation](docs/evaluation.md)
-- [Cost Analysis](docs/cost-analysis.md)
-- [Future Roadmap](docs/future-roadmap.md)
 
 ---
 
-Part of a [6-month Product AI Engineer portfolio](https://github.com/ashutosh3060) —
-`ai-core` · `llm-engineering-playground` · `enterprise-rag-platform` ·
-`multi-agent-ai-platform` · `llm-evaluation-platform` · `production-ai-assistant` ·
-`ai-model-router`
+Part of a [6-month Product AI Engineer portfolio](https://github.com/ashutosh3060).
